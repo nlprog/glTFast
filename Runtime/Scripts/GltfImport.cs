@@ -17,6 +17,12 @@
 #define GLTFAST_THREADS
 #endif
 
+#if KTX_UNITY_2_2_OR_NEWER || (!UNITY_2021_2_OR_NEWER && KTX_UNITY_1_3_OR_NEWER)
+#define KTX
+#elif KTX_UNITY
+#warning You have to update KtxUnity to enable support for KTX textures in glTFast
+#endif
+
 // #define MEASURE_TIMINGS
 
 using System;
@@ -36,6 +42,9 @@ using Unity.Collections.LowLevel.Unsafe;
 using Unity.Mathematics;
 using Debug = UnityEngine.Debug;
 using Object = UnityEngine.Object;
+#if KTX
+using KtxUnity;
+#endif
 #if MESHOPT
 using Meshoptimizer;
 #endif
@@ -92,7 +101,7 @@ namespace GLTFast {
 #if DRACO_UNITY
             Extensions.DracoMeshCompression,
 #endif
-#if KTX_UNITY
+#if KTX
             Extensions.TextureBasisUniversal,
 #endif // KTX_UNITY
 #if MESHOPT
@@ -134,7 +143,7 @@ namespace GLTFast {
         GlbBinChunk[] binChunks;
 
         Dictionary<int,Task<IDownload>> downloadTasks;
-#if KTX_UNITY
+#if KTX
         Dictionary<int,Task<IDownload>> ktxDownloadTasks;
 #endif
         Dictionary<int,TextureDownloadBase> textureDownloadTasks;
@@ -152,7 +161,7 @@ namespace GLTFast {
         /// </summary>
         Dictionary<MeshPrimitive,List<MeshPrimitive>>[] meshPrimitiveCluster;
         List<ImageCreateContext> imageCreateContexts;
-#if KTX_UNITY
+#if KTX
         List<KtxLoadContextBase> ktxLoadContextsBuffer;
 #endif // KTX_UNITY
 
@@ -664,7 +673,7 @@ namespace GLTFast {
                 textureDownloadTasks.Clear();
             }
             
-#if KTX_UNITY
+#if KTX
             if (ktxDownloadTasks != null) {
                 success = success && await WaitForKtxDownloads();
                 ktxDownloadTasks.Clear();
@@ -826,7 +835,7 @@ namespace GLTFast {
                     }
                 }
 
-#if KTX_UNITY
+#if KTX
                 // Derive image type from texture extension
                 for (int i = 0; i < gltfRoot.textures.Length; i++) {
                     var texture = gltfRoot.textures[i];
@@ -993,7 +1002,7 @@ namespace GLTFast {
         }
 
 
-#if KTX_UNITY
+#if KTX
         async Task<bool> WaitForKtxDownloads() {
             var tasks = new Task<bool>[ktxDownloadTasks.Count];
             var i = 0;
@@ -1008,18 +1017,21 @@ namespace GLTFast {
             return true;
         }
         
-        async Task<bool> ProcessKtxDownload(int index, Task<IDownload> downloadTask) {
+        async Task<bool> ProcessKtxDownload(int imageIndex, Task<IDownload> downloadTask) {
             var www = await downloadTask;
             if(www.success) {
-                var ktxContext = new KtxLoadContext(index,www.data);
-                var forceSampleLinear = imageGamma!=null && !imageGamma[ktxContext.imageIndex];
-                var textureResult = await ktxContext.LoadKtx(forceSampleLinear);
-                images[ktxContext.imageIndex] = textureResult.texture;
-                return true;
+                var ktxContext = new KtxLoadContext(imageIndex,www.data);
+                var forceSampleLinear = imageGamma!=null && !imageGamma[imageIndex];
+                var transcodeResult = await ktxContext.LoadAndTranscode(forceSampleLinear);
+                if (transcodeResult == ErrorCode.Success) {
+                    var textureResult = ktxContext.CreateTextureAndDispose();
+                    images[imageIndex] = textureResult.texture;
+                    return textureResult.errorCode == ErrorCode.Success;
+                }
             } else {
-                logger?.Error(LogCode.TextureDownloadFailed,www.error,index.ToString());
-                return false;
+                logger?.Error(LogCode.TextureDownloadFailed,www.error,imageIndex.ToString());
             }
+            return false;
         }
 #endif // KTX_UNITY
 
@@ -1082,7 +1094,7 @@ namespace GLTFast {
             Profiler.BeginSample("LoadTexture");
 
             if(isKtx) {
-#if KTX_UNITY
+#if KTX
                 var downloadTask = downloadProvider.Request(url);
                 if(ktxDownloadTasks==null) {
                     ktxDownloadTasks = new Dictionary<int, Task<IDownload>>();
@@ -1325,7 +1337,7 @@ namespace GLTFast {
                     Assert.AreEqual(images.Length,gltfRoot.images.Length);
                 }
                 imageCreateContexts = new List<ImageCreateContext>();
-#if KTX_UNITY
+#if KTX
                 await
 #endif
                 CreateTexturesFromBuffers(gltfRoot.images,gltfRoot.bufferViews,imageCreateContexts);
@@ -1357,23 +1369,9 @@ namespace GLTFast {
                 await CreatePrimitiveContexts(gltfRoot);
             }
 
-#if KTX_UNITY
+#if KTX
             if(ktxLoadContextsBuffer!=null) {
-
-                var ktxTasks = new Task<KtxUnity.TextureResult>[ktxLoadContextsBuffer.Count];
-                for (var i = 0; i < ktxLoadContextsBuffer.Count; i++) {
-                    var ktx = ktxLoadContextsBuffer[i];
-                    var forceSampleLinear = imageGamma!=null && !imageGamma[ktx.imageIndex];
-                    ktxTasks[i] = ktx.LoadKtx(forceSampleLinear);
-                    await deferAgent.BreakPoint();
-                }
-                await Task.WhenAll(ktxTasks);
-
-                for (var i = 0; i < ktxLoadContextsBuffer.Count; i++) {
-                    var ktx = ktxLoadContextsBuffer[i];
-                    images[ktx.imageIndex] = ktxTasks[i].Result.texture;
-                }
-                ktxLoadContextsBuffer.Clear();
+                await ProcessKtxLoadContexts();
             }
 #endif // KTX_UNITY
 
@@ -2033,7 +2031,7 @@ namespace GLTFast {
 #endif
         }
 
-#if KTX_UNITY
+#if KTX
         async Task
 #else
         void
@@ -2061,7 +2059,7 @@ namespace GLTFast {
                     if (img.bufferView >= 0) {
                         
                         if(imgFormat == ImageFormat.KTX) {
-#if KTX_UNITY
+#if KTX
                             Profiler.BeginSample("CreateTexturesFromBuffers.KtxLoadNativeContext");
                             if(ktxLoadContextsBuffer==null) {
                                 ktxLoadContextsBuffer = new List<KtxLoadContextBase>();
@@ -3081,5 +3079,49 @@ namespace GLTFast {
                     return ImageFormat.Unknown;
             }
         }
+        
+#if KTX
+        struct KtxTranscodeTaskWrapper {
+            public int index;
+            public ErrorCode errorCode;
+        }
+
+        static async Task<KtxTranscodeTaskWrapper> KtxLoadAndTranscode(int index, KtxLoadContextBase ktx, bool linear) {
+            return new KtxTranscodeTaskWrapper {
+                index = index,
+                errorCode = await ktx.LoadAndTranscode(linear)
+            };
+        }
+        
+        async Task ProcessKtxLoadContexts() {
+            var maxCount = SystemInfo.processorCount+1;
+
+            var totalCount = ktxLoadContextsBuffer.Count;
+            var startedCount = 0;
+            var ktxTasks = new List<Task<KtxTranscodeTaskWrapper>>(maxCount);
+
+            while (startedCount < totalCount || ktxTasks.Count>0) {
+                while (ktxTasks.Count < maxCount && startedCount < totalCount) {
+                    var ktx = ktxLoadContextsBuffer[startedCount];
+                    var forceSampleLinear = imageGamma != null && !imageGamma[ktx.imageIndex];
+                    ktxTasks.Add(KtxLoadAndTranscode(startedCount, ktx, forceSampleLinear));
+                    startedCount++;
+                    await deferAgent.BreakPoint();
+                }
+                
+                var kTask = await Task.WhenAny(ktxTasks);
+                var i = kTask.Result.index;
+                if (kTask.Result.errorCode == ErrorCode.Success) {
+                    var ktx = ktxLoadContextsBuffer[i];
+                    var result = ktx.CreateTextureAndDispose();
+                    images[ktx.imageIndex] = result.texture;
+                    await deferAgent.BreakPoint();
+                }
+                ktxTasks.Remove(kTask);
+            }
+            
+            ktxLoadContextsBuffer.Clear();
+        }
+#endif
     }
 }
