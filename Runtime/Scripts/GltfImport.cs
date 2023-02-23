@@ -269,7 +269,10 @@ namespace GLTFast
                 {
                     var defaultDeferAgentGameObject = new GameObject("glTF-StableFramerate");
                     // Keep it across scene loads
-                    UnityEngine.Object.DontDestroyOnLoad(defaultDeferAgentGameObject);
+                    if (Application.isPlaying)
+                    {
+                        UnityEngine.Object.DontDestroyOnLoad(defaultDeferAgentGameObject);
+                    }
                     SetDefaultDeferAgent(defaultDeferAgentGameObject.AddComponent<TimeBudgetPerFrameDeferAgent>());
                     // Adding a DefaultDeferAgent component will make it un-register via <see cref="UnsetDefaultDeferAgent"/>
                     defaultDeferAgentGameObject.AddComponent<DefaultDeferAgent>();
